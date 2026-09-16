@@ -600,7 +600,7 @@ async function startServer() {
   setInterval(runRetentionPolicy, 12 * 60 * 60 * 1000);
 
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Дополнительная защита сервера и заголовки безопасности
   app.disable('x-powered-by');
