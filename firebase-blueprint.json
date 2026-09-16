@@ -1,0 +1,74 @@
+{
+  "entities": {
+    "submissions": {
+      "collection": "submissions",
+      "fields": {
+        "id": { "type": "string", "description": "ID анкеты" },
+        "applicantName": { "type": "string", "description": "ФИО абитуриента" },
+        "referrerName": { "type": "string", "description": "ФИО рекомендателя" },
+        "referrerType": { "type": "string", "description": "Тип рекомендателя (student/staff/null)" },
+        "answers": { "type": "map", "description": "Ответы на вопросы анкеты" },
+        "submittedAt": { "type": "string", "description": "Дата и время подачи (ISO)" },
+        "consentGiven": { "type": "boolean", "description": "Подтверждение согласия на обработку ПДн" },
+        "consentAt": { "type": "string", "description": "Время фиксации согласия" },
+        "consentVersion": { "type": "string", "description": "Версия текста согласия" },
+        "consentPurpose": { "type": "string", "description": "Цель обработки персональных данных" },
+        "consentDataScope": { "type": "string", "description": "Состав обрабатываемых данных" },
+        "isDuplicate": { "type": "boolean", "description": "Флаг обнаруженного дубликата" }
+      },
+      "indexes": [
+        { "fields": ["submittedAt", "applicantName"] }
+      ],
+      "securityRules": "allow create: if request.resource.data.consentGiven == true; allow read, write: if true;"
+    },
+    "questions": {
+      "collection": "questions",
+      "fields": {
+        "id": { "type": "string", "description": "ID вопроса" },
+        "text": { "type": "string", "description": "Формулировка вопроса" },
+        "type": { "type": "string", "description": "Тип поля (select/text)" },
+        "options": { "type": "list", "description": "Варианты ответов" },
+        "isDefault": { "type": "boolean", "description": "Признак базового системного вопроса" },
+        "required": { "type": "boolean", "description": "Обязательность ответа" }
+      },
+      "indexes": [],
+      "securityRules": "allow read: if true; allow write: if true;"
+    },
+    "logs": {
+      "collection": "logs",
+      "fields": {
+        "id": { "type": "string", "description": "ID лога" },
+        "timestamp": { "type": "string", "description": "Время события (ISO)" },
+        "action": { "type": "string", "description": "Название действия" },
+        "details": { "type": "string", "description": "Подробности события" }
+      },
+      "indexes": [
+        { "fields": ["timestamp"] }
+      ],
+      "securityRules": "allow read, write: if true;"
+    },
+    "captchas": {
+      "collection": "captchas",
+      "fields": {
+        "id": { "type": "string", "description": "ID капчи" },
+        "num1": { "type": "number", "description": "Первое слагаемое" },
+        "num2": { "type": "number", "description": "Второе слагаемое" },
+        "answer": { "type": "number", "description": "Правильный ответ" },
+        "expiresAt": { "type": "number", "description": "Срок действия в мс" }
+      },
+      "indexes": [],
+      "securityRules": "allow read, write: if true;"
+    },
+    "sessions": {
+      "collection": "sessions",
+      "fields": {
+        "token": { "type": "string", "description": "Токен сессии администратора" },
+        "username": { "type": "string", "description": "Логин администратора" },
+        "expiresAt": { "type": "number", "description": "Срок действия токена в мс" }
+      },
+      "indexes": [],
+      "securityRules": "allow read, write: if true;"
+    }
+  },
+  "securityRules": "rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /{document=**} {\n      allow read, write: if true;\n    }\n  }\n}"
+}
