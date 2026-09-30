@@ -129,7 +129,7 @@ const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET!;
 const APP_URL = process.env.APP_URL || '';
 
 // Сессии администратора (токен -> время истечения)
-const SESSION_TTL = 2 * 60 * 60 * 1000; // 2 часа
+const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 дней
 
 // Создание хэша пароля администратора (HMAC SHA-512) для совместимости со старыми паролями
 const generatePasswordHash = (password: string) => {
@@ -301,10 +301,29 @@ async function initDatabase() {
       text TEXT NOT NULL,
       type TEXT NOT NULL,
       options TEXT,
+      imageUrl TEXT,
       isDefault INTEGER NOT NULL,
       required INTEGER NOT NULL
     );
   `);
+
+  try {
+    await db.exec(`ALTER TABLE questions ADD COLUMN imageUrl TEXT;`);
+  } catch (e) {}
+
+  // Таблица настроек системы (расписание авто-бэкапов и системные параметры)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+
+  // Установка периода авто-бэкапа по умолчанию: '7d' (каждую неделю)
+  const existingPeriod = await db.get<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['backup_period']);
+  if (!existingPeriod) {
+    await db.run('INSERT INTO settings (key, value) VALUES (?, ?)', ['backup_period', '7d']);
+  }
 
   // Таблица logs
   await db.exec(`
@@ -341,8 +360,8 @@ async function initDatabase() {
   if (countQuestions && countQuestions.count === 0) {
     for (const q of DEFAULT_QUESTIONS) {
       await db.run(
-        'INSERT INTO questions (id, text, type, options, isDefault, required) VALUES (?, ?, ?, ?, ?, ?)',
-        [q.id, q.text, q.type, JSON.stringify(q.options), q.isDefault ? 1 : 0, q.required ? 1 : 0]
+        'INSERT INTO questions (id, text, type, options, imageUrl, isDefault, required) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [q.id, q.text, q.type, JSON.stringify(q.options), null, q.isDefault ? 1 : 0, q.required ? 1 : 0]
       );
     }
   }
@@ -455,91 +474,72 @@ async function logAction(action: string, details: string) {
   }
 }
 
-// Выполнение политики хранения данных (Retention Policy) — удаление устаревших (старше 1 года)
-async function runRetentionPolicy() {
+// Очистка просроченных сессий авторизации и капч
+async function cleanExpiredSessions() {
   try {
-    const oneYearAgo = new Date();
-    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-    const thresholdIso = oneYearAgo.toISOString();
-
-    // Находим количество записей к удалению в SQLite
-    const countToDelete = await db.get<{ count: number }>(
-      'SELECT COUNT(*) as count FROM submissions WHERE submittedAt < ?',
-      [thresholdIso]
-    );
-
-    const deletedCount = countToDelete?.count || 0;
-
-    if (deletedCount > 0) {
-      // Удаляем анкеты старше 1 года
-      await db.run('DELETE FROM submissions WHERE submittedAt < ?', [thresholdIso]);
-      
-      // Очищаем связанные логи аудита (логи старше 1 года)
-      await db.run('DELETE FROM logs WHERE timestamp < ?', [thresholdIso]);
-
-      // Также удаляем устаревшие резервные копии (созданные более года назад)
-      if (fs.existsSync(BACKUPS_DIR)) {
-        const files = await fs.promises.readdir(BACKUPS_DIR);
-        for (const f of files) {
-          const filePath = path.join(BACKUPS_DIR, f);
-          const stat = await fs.promises.stat(filePath);
-          if (stat.mtime < oneYearAgo) {
-            await fs.promises.unlink(filePath);
-            await logAction('Удаление старого бэкапа', `Автоматическое удаление устаревшей резервной копии: ${f}`);
-          }
-        }
-      }
-
-      await logAction('Retention Policy', `Запуск очистки данных. Автоматически удалено устаревших анкет: ${deletedCount}`);
-    }
-    
-    // Очищаем просроченные сессии и капчи
+    if (!db) return;
     await db.run('DELETE FROM sessions WHERE expiresAt < ?', [Date.now()]);
     await db.run('DELETE FROM captchas WHERE expiresAt < ?', [Date.now()]);
-
-    // Удаление устаревших данных из Firebase Firestore
-    if (firestoreDb) {
-      try {
-        const subSnap = await getDocs(collection(firestoreDb, 'submissions'));
-        const expiredSubDocs: any[] = [];
-        subSnap.forEach(d => {
-          const data = d.data();
-          if (data.submittedAt && data.submittedAt < thresholdIso) {
-            expiredSubDocs.push(d.ref);
-          }
-        });
-
-        if (expiredSubDocs.length > 0) {
-          const batch = writeBatch(firestoreDb);
-          expiredSubDocs.forEach(ref => batch.delete(ref));
-          await batch.commit();
-          console.log(`🔥 Firebase Retention Policy: удалено ${expiredSubDocs.length} устаревших анкет`);
-        }
-
-        const logSnap = await getDocs(collection(firestoreDb, 'logs'));
-        const expiredLogDocs: any[] = [];
-        logSnap.forEach(d => {
-          const data = d.data();
-          if (data.timestamp && data.timestamp < thresholdIso) {
-            expiredLogDocs.push(d.ref);
-          }
-        });
-
-        if (expiredLogDocs.length > 0) {
-          const batch = writeBatch(firestoreDb);
-          expiredLogDocs.forEach(ref => batch.delete(ref));
-          await batch.commit();
-        }
-      } catch (fbRetErr) {
-        console.warn("Предупреждение при выполнении Retention в Firestore:", fbRetErr);
-      }
-    }
-
   } catch (err: any) {
-    console.error("Ошибка при выполнении политики очистки данных (retention):", err);
-    try {
-      await logAction('Retention Error', `Ошибка выполнения очистки: ${err.message}`);
-    } catch (e) {}
+    console.error("Ошибка при очистке сессий:", err);
+  }
+}
+
+// Карта интервалов автоматического резервного копирования
+const AUTO_BACKUP_PERIODS: Record<string, number> = {
+  '1d': 24 * 60 * 60 * 1000,       // 1 день
+  '3d': 3 * 24 * 60 * 60 * 1000,   // 3 дня
+  '7d': 7 * 24 * 60 * 60 * 1000,   // неделя (по умолчанию)
+  '30d': 30 * 24 * 60 * 60 * 1000  // месяц
+};
+
+const AUTO_BACKUP_LABELS: Record<string, string> = {
+  '1d': '1 день',
+  '3d': '3 дня',
+  '7d': 'неделя (по умолчанию)',
+  '30d': 'месяц'
+};
+
+// Выполнение создания авто-бэкапа
+async function performAutoBackup(reason: string) {
+  try {
+    const dbFile = path.join(DATA_DIR, 'database.sqlite');
+    if (!fs.existsSync(dbFile)) return;
+    if (!fs.existsSync(BACKUPS_DIR)) {
+      await fs.promises.mkdir(BACKUPS_DIR, { recursive: true });
+    }
+    const dateStr = new Date().toISOString().replace(/T/, '_').replace(/\..+/, '').replace(/:/g, '-');
+    const backupFilename = `backup_auto_${dateStr}.db`;
+    const backupPath = path.join(BACKUPS_DIR, backupFilename);
+    await fs.promises.copyFile(dbFile, backupPath);
+
+    const now = Date.now();
+    await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ['last_auto_backup', now.toString()]);
+    await logAction('Авто-бэкап', `Автоматический бэкап сохранен: ${backupFilename} (${reason})`);
+    console.log(`[AutoBackup] Создан файл: ${backupFilename}`);
+  } catch (err: any) {
+    console.error("[AutoBackup] Сбой при создании авто-бэкапа:", err);
+  }
+}
+
+// Проверка и запуск планового авто-бэкапа по установленному периоду
+async function checkAndRunAutoBackup() {
+  try {
+    if (!db) return;
+    const periodRow = await db.get<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['backup_period']);
+    const period = periodRow?.value || '7d';
+    const intervalMs = AUTO_BACKUP_PERIODS[period] || AUTO_BACKUP_PERIODS['7d'];
+
+    const lastRow = await db.get<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['last_auto_backup']);
+    const now = Date.now();
+    const lastBackupTime = lastRow ? parseInt(lastRow.value, 10) : 0;
+
+    if (!lastRow || (now - lastBackupTime) >= intervalMs) {
+      const label = AUTO_BACKUP_LABELS[period] || '1 неделя';
+      await performAutoBackup(`Период: ${label}`);
+    }
+  } catch (err) {
+    console.error("Ошибка при проверке расписания авто-бэкапа:", err);
   }
 }
 
@@ -594,13 +594,18 @@ const rateLimit = (maxRequests: number, windowMs: number) => {
 
 async function startServer() {
   await initDatabase();
-  await runRetentionPolicy();
+  await cleanExpiredSessions();
 
-  // Запуск retention по расписанию каждые 12 часов
-  setInterval(runRetentionPolicy, 12 * 60 * 60 * 1000);
+  // Очистка просроченных сессий и капч по расписанию каждые 12 часов
+  setInterval(cleanExpiredSessions, 12 * 60 * 60 * 1000);
+
+  // Первоначальная проверка и запуск авто-бэкапа (по умолчанию период: 1 неделя)
+  await checkAndRunAutoBackup();
+  // Проверка расписания авто-бэкапа каждые 15 минут
+  setInterval(checkAndRunAutoBackup, 15 * 60 * 1000);
 
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
 
   // Дополнительная защита сервера и заголовки безопасности
   app.disable('x-powered-by');
@@ -654,7 +659,8 @@ async function startServer() {
     next();
   });
 
-  app.use(express.json());
+  app.use(express.json({ limit: '25mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
   // Получить новый одноразовый математический капча-челлендж с сервера
   app.get('/api/captcha', rateLimit(30, 60000), async (req, res) => {
@@ -733,6 +739,11 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // Проверка активности и валидности текущей сессии
+  app.get('/api/check-session', requireAdmin, (req, res) => {
+    res.json({ ok: true });
   });
 
   // Информация о подключенной базе данных (Firebase Firestore)
@@ -823,7 +834,7 @@ async function startServer() {
         return res.status(400).json({ error: "Неверный формат ФИО. ФИО должно содержать фамилию и имя на русском языке." });
       }
 
-      // 4. Проверка лимитов и дубликатов в Firebase Firestore
+      // 4. Проверка дубликатов в Firebase Firestore
       let isDuplicate = 0;
       let totalCount = 0;
 
@@ -831,9 +842,6 @@ async function startServer() {
         try {
           const subSnap = await getDocs(collection(firestoreDb, 'submissions'));
           totalCount = subSnap.size;
-          if (totalCount >= 5000) {
-            return res.status(400).json({ error: "Достигнут лимит в 5000 абитуриентов. Прием новых анкет приостановлен." });
-          }
           const lowerName = cleanName.toLowerCase();
           subSnap.forEach(d => {
             const data = d.data();
@@ -847,10 +855,6 @@ async function startServer() {
       }
 
       if (!firestoreDb || totalCount === 0) {
-        const countRow = await db.get<{ count: number }>('SELECT COUNT(*) as count FROM submissions');
-        if (countRow && countRow.count >= 5000) {
-          return res.status(400).json({ error: "Достигнут лимит в 5000 абитуриентов. Прием новых анкет приостановлен." });
-        }
         const duplicateRow = await db.get<{ count: number }>(
           'SELECT COUNT(*) as count FROM submissions WHERE LOWER(TRIM(applicantName)) = LOWER(TRIM(?))',
           [cleanName]
@@ -945,37 +949,9 @@ async function startServer() {
     }
   });
 
-  // Полная очистка БД абитуриентов (требуется авторизация)
+  // Функция полной очистки БД отключена по требованию безопасности
   app.post('/api/submissions/clear', requireAdmin, async (req, res) => {
-    try {
-      if (firestoreDb) {
-        try {
-          const snap = await getDocs(collection(firestoreDb, 'submissions'));
-          const batch = writeBatch(firestoreDb);
-          snap.forEach(d => batch.delete(d.ref));
-          await batch.commit();
-          console.log("🔥 Все анкеты успешно удалены из Firebase Firestore");
-        } catch (fbClearErr) {
-          console.warn("Ошибка очистки Firebase Firestore:", fbClearErr);
-        }
-      }
-
-      await db.run('DELETE FROM submissions');
-      await logAction('Очистка БД', 'Успешно произведена полная очистка базы данных анкет');
-      res.json({ success: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Эндпоинт для вызова Retention Policy вручную
-  app.post('/api/submissions/retention', requireAdmin, async (req, res) => {
-    try {
-      await runRetentionPolicy();
-      res.json({ success: true, message: "Политика удаления устаревших данных успешно выполнена." });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+    return res.status(403).json({ error: "Функция очистки базы данных отключена в соответствии с политикой безопасности." });
   });
 
   // Эндпоинты вопросов
@@ -1000,6 +976,7 @@ async function startServer() {
         text: r.text,
         type: r.type,
         options: JSON.parse(r.options || '[]'),
+        imageUrl: r.imageUrl || undefined,
         isDefault: !!r.isDefault,
         required: !!r.required
       }));
@@ -1030,6 +1007,7 @@ async function startServer() {
               text: q.text,
               type: q.type,
               options: q.options || [],
+              imageUrl: q.imageUrl || null,
               isDefault: !!q.isDefault,
               required: !!q.required,
               order: i
@@ -1048,8 +1026,8 @@ async function startServer() {
         await db.run('DELETE FROM questions');
         for (const q of questions) {
           await db.run(
-            'INSERT INTO questions (id, text, type, options, isDefault, required) VALUES (?, ?, ?, ?, ?, ?)',
-            [q.id, q.text, q.type, JSON.stringify(q.options), q.isDefault ? 1 : 0, q.required ? 1 : 0]
+            'INSERT INTO questions (id, text, type, options, imageUrl, isDefault, required) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [q.id, q.text, q.type, JSON.stringify(q.options), q.imageUrl || null, q.isDefault ? 1 : 0, q.required ? 1 : 0]
           );
         }
         await db.run('COMMIT');
@@ -1204,6 +1182,60 @@ async function startServer() {
     }
   });
 
+  // Получить текущие настройки расписания авто-бэкапа
+  app.get('/api/submissions/backup-settings', requireAdmin, async (req, res) => {
+    try {
+      const periodRow = await db.get<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['backup_period']);
+      const period = periodRow?.value || '7d';
+      const lastRow = await db.get<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['last_auto_backup']);
+      const lastBackupTime = lastRow ? parseInt(lastRow.value, 10) : null;
+      const intervalMs = AUTO_BACKUP_PERIODS[period] || AUTO_BACKUP_PERIODS['7d'];
+      const nextBackupTime = lastBackupTime ? lastBackupTime + intervalMs : Date.now();
+
+      res.json({
+        period,
+        periodLabel: AUTO_BACKUP_LABELS[period] || 'неделя (по умолчанию)',
+        lastBackupTime,
+        nextBackupTime
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Сохранить выбранный период авто-бэкапа (1 день, 3 дня, 7 дней (неделя), 30 дней (месяц))
+  app.post('/api/submissions/backup-settings', requireAdmin, async (req, res) => {
+    try {
+      const { period } = req.body;
+      const validPeriods = ['1d', '3d', '7d', '30d'];
+      if (!validPeriods.includes(period)) {
+        return res.status(400).json({ error: "Недопустимый период. Допустимо: 1d (1 день), 3d (3 дня), 7d (неделя), 30d (месяц)" });
+      }
+
+      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ['backup_period', period]);
+      const label = AUTO_BACKUP_LABELS[period] || period;
+      await logAction('Настройка авто-бэкапа', `Период автоматического резервного копирования изменен на: ${label}`);
+
+      // Проверяем, нужно ли выполнить бэкап сейчас с учетом нового периода
+      await checkAndRunAutoBackup();
+
+      const lastRow = await db.get<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['last_auto_backup']);
+      const lastBackupTime = lastRow ? parseInt(lastRow.value, 10) : null;
+      const intervalMs = AUTO_BACKUP_PERIODS[period] || AUTO_BACKUP_PERIODS['7d'];
+      const nextBackupTime = lastBackupTime ? lastBackupTime + intervalMs : Date.now();
+
+      res.json({
+        success: true,
+        period,
+        periodLabel: label,
+        lastBackupTime,
+        nextBackupTime
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Раздача клиентской части (SPA)
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -1219,7 +1251,7 @@ async function startServer() {
     });
   }
 
-  const HOST = '0.0.0.0';
+  const HOST = process.env.NODE_ENV === 'production' ? '127.0.0.1' : '0.0.0.0';
   app.listen(PORT, HOST, () => {
     console.log(`Сервер запущен на http://${HOST}:${PORT}`);
   });

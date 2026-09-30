@@ -10,9 +10,9 @@ import {
   getStoredSubmissionsAsync, 
   saveSubmissionAsync, 
   deleteSubmissionAsync, 
-  clearAllSubmissionsAsync,
   loginAdminAsync,
-  logoutAdmin
+  logoutAdmin,
+  verifySessionAsync
 } from './dataStore';
 import { Shield, Key, Eye, HelpCircle, Check, AlertTriangle, Sparkles, Loader2 } from 'lucide-react';
 
@@ -44,7 +44,15 @@ export default function App() {
     // Проверка сохраненной сессии администратора при монтировании
     const token = sessionStorage.getItem('nemk_admin_token');
     if (token) {
-      setIsAdminMode(true);
+      verifySessionAsync().then(isValid => {
+        if (isValid) {
+          setIsAdminMode(true);
+        } else {
+          setIsAdminMode(false);
+        }
+      }).catch(() => {
+        setIsAdminMode(false);
+      });
     }
   }, []);
 
@@ -63,17 +71,23 @@ export default function App() {
           setIsLoadingSubmissions(false);
         })
         .catch(err => {
-          console.error("Не удалось синхронизировать анкеты:", err);
           setIsLoadingSubmissions(false);
-          // Автоматический разлогин при ошибках авторизации (токен просрочен/неверен)
-          if (err && err.message && (
-            err.message.includes("токен") || 
-            err.message.includes("авторизац") || 
-            err.message.includes("401") ||
-            err.message.includes("отсутствует заголовок")
-          )) {
+          const isAuthError = (err && err.status === 401) || (
+            err && err.message && (
+              err.message.includes("токен") || 
+              err.message.includes("авторизац") || 
+              err.message.includes("401") ||
+              err.message.includes("отсутствует заголовок") ||
+              err.message.includes("сессия")
+            )
+          );
+
+          if (isAuthError) {
             handleLogout();
+            return;
           }
+
+          console.error("Не удалось синхронизировать анкеты:", err);
         });
     };
 
@@ -97,12 +111,6 @@ export default function App() {
   const handleDeleteSubmission = async (id: string) => {
     await deleteSubmissionAsync(id);
     setSubmissions(prev => prev.filter(s => s.id !== id));
-  };
-
-  // Полное удаление всех анкет
-  const handleClearAll = async () => {
-    await clearAllSubmissionsAsync();
-    setSubmissions([]);
   };
 
   // Обновление списка вопросов анкеты
@@ -186,7 +194,6 @@ export default function App() {
               questions={questions}
               submissions={submissions}
               onDeleteSubmission={handleDeleteSubmission}
-              onClearAll={handleClearAll}
               onUpdateQuestions={handleUpdateQuestions}
               onBackToMain={() => setIsAdminMode(false)}
               isLoading={isLoadingSubmissions}

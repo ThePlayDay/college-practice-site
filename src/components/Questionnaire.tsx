@@ -318,6 +318,18 @@ export default function Questionnaire({ questions, onSubmit, onOpenLifeModal }: 
                     <span className="flex-1">{question.text} {question.required && <span className="text-red-500">*</span>}</span>
                   </label>
 
+                  {/* Фотография к вопросу */}
+                  {question.imageUrl && (
+                    <div className="my-2.5 rounded-xl overflow-hidden border border-slate-200 bg-slate-50/60 max-w-lg shadow-xs">
+                      <img
+                        src={question.imageUrl}
+                        alt={question.text}
+                        className="w-full h-auto max-h-72 object-contain mx-auto"
+                        loading="lazy"
+                      />
+                    </div>
+                  )}
+
                   {question.type === 'select' && question.options && (
                     <div className="grid grid-cols-1 gap-2.5">
                       {question.options.map((option, optIdx) => {

@@ -269,8 +269,8 @@ function requireAdminPHP($db) {
         exit;
     }
     
-    // Продлеваем сессию на 2 часа
-    $newExpires = (time() + 2 * 60 * 60) * 1000;
+    // Продлеваем сессию на 7 дней
+    $newExpires = (time() + 7 * 24 * 60 * 60) * 1000;
     $db->prepare("UPDATE sessions SET expiresAt = ? WHERE token = ?")->execute([$newExpires, $token]);
 }
 
@@ -876,6 +876,12 @@ try {
 
         // Все остальные GET требуют авторизации
         requireAdminPHP($db);
+
+        // CHECK SESSION
+        if ($action === 'check-session') {
+            echo json_encode(['ok' => true]);
+            exit;
+        }
 
         // GET LOGS
         if ($action === 'logs') {

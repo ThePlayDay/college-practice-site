@@ -2,18 +2,20 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Question, Submission } from '../types';
 import { 
   Calendar, Search, Trash2, CalendarDays, BarChart3, ListFilter, 
-  ChevronDown, RefreshCw, Plus, Save, AlertCircle, ArrowLeft, Download, Eye, FileSpreadsheet,
-  Loader2, ShieldAlert, Database, History, HelpCircle
+  ChevronDown, RefreshCw, Plus, Save, AlertCircle, ArrowLeft, Download, FileSpreadsheet,
+  Loader2, ShieldAlert, Database, History, HelpCircle, Edit3, Image as ImageIcon, Upload, Clock, Check, X
 } from 'lucide-react';
 import { 
   saveStoredQuestions,
+  saveStoredQuestionsAsync,
   getActionLogsAsync, 
   getBackupsAsync, 
   createBackupAsync, 
   restoreBackupAsync, 
   deleteBackupAsync,
-  triggerRetentionPolicyAsync,
-  getDbStatusAsync
+  getDbStatusAsync,
+  getBackupSettingsAsync,
+  updateBackupSettingsAsync
 } from '../dataStore';
 import PieChartModal from './PieChartModal';
 
@@ -21,7 +23,7 @@ interface AdminPanelProps {
   questions: Question[];
   submissions: Submission[];
   onDeleteSubmission: (id: string) => void;
-  onClearAll: () => void;
+  onClearAll?: () => void;
   onUpdateQuestions: (updatedQuestions: Question[]) => void;
   onBackToMain: () => void;
   isLoading?: boolean;
@@ -31,7 +33,6 @@ export default function AdminPanel({
   questions, 
   submissions, 
   onDeleteSubmission, 
-  onClearAll, 
   onUpdateQuestions,
   onBackToMain,
   isLoading = false
@@ -49,10 +50,20 @@ export default function AdminPanel({
   const [backupError, setBackupError] = useState('');
   const [backupSuccess, setBackupSuccess] = useState('');
 
-  // Состояние модального окна подтверждения очистки
-  const [isConfirmClearOpen, setIsConfirmClearOpen] = useState(false);
-  const [confirmKeywordInput, setConfirmKeywordInput] = useState('');
-  const [clearError, setClearError] = useState('');
+  // Состояния авто-бэкапа
+  const [backupPeriod, setBackupPeriod] = useState<string>('7d');
+  const [backupPeriodLabel, setBackupPeriodLabel] = useState<string>('неделя (по умолчанию)');
+  const [lastBackupTime, setLastBackupTime] = useState<number | null>(null);
+  const [nextBackupTime, setNextBackupTime] = useState<number | null>(null);
+  const [isUpdatingBackupSettings, setIsUpdatingBackupSettings] = useState(false);
+
+  // Состояния для редактирования вопроса
+  const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
+  const [editQuestionText, setEditQuestionText] = useState('');
+  const [editQuestionType, setEditQuestionType] = useState<'select' | 'text'>('select');
+  const [editQuestionOptions, setEditQuestionOptions] = useState<string[]>(['', '']);
+  const [editQuestionImage, setEditQuestionImage] = useState<string>('');
+  const [editQuestionError, setEditQuestionError] = useState('');
 
   // Состояние фильтрации по датам
   const [filterType, setFilterType] = useState<'day' | 'range' | 'all'>('all');
@@ -72,6 +83,7 @@ export default function AdminPanel({
   const [newQuestionText, setNewQuestionText] = useState('');
   const [newQuestionType, setNewQuestionType] = useState<'select' | 'text'>('select');
   const [newQuestionOptions, setNewQuestionOptions] = useState<string[]>(['', '']);
+  const [newQuestionImage, setNewQuestionImage] = useState<string>('');
   const [questionError, setQuestionError] = useState('');
 
   // Выбранный вопрос для отображения круговой диаграммы
@@ -114,11 +126,45 @@ export default function AdminPanel({
     }
   };
 
+  const loadBackupSettings = async () => {
+    try {
+      const s = await getBackupSettingsAsync();
+      if (s && s.period) {
+        setBackupPeriod(s.period);
+        setBackupPeriodLabel(s.periodLabel || 'неделя (по умолчанию)');
+        setLastBackupTime(s.lastBackupTime);
+        setNextBackupTime(s.nextBackupTime);
+      }
+    } catch (err) {
+      console.error("Ошибка при получении настроек авто-бэкапа:", err);
+    }
+  };
+
+  const handleUpdateBackupPeriod = async (newPeriod: string) => {
+    setIsUpdatingBackupSettings(true);
+    setBackupError('');
+    setBackupSuccess('');
+    try {
+      const res = await updateBackupSettingsAsync(newPeriod);
+      setBackupPeriod(res.period);
+      setBackupPeriodLabel(res.periodLabel);
+      setLastBackupTime(res.lastBackupTime);
+      setNextBackupTime(res.nextBackupTime);
+      setBackupSuccess(`Период авто-бэкапа успешно обновлен: ${res.periodLabel}`);
+      loadBackups();
+    } catch (err: any) {
+      setBackupError('Не удалось изменить период авто-бэкапа: ' + err.message);
+    } finally {
+      setIsUpdatingBackupSettings(false);
+    }
+  };
+
   useEffect(() => {
     if (activeTab === 'logs') {
       loadLogs();
     } else if (activeTab === 'backups') {
       loadBackups();
+      loadBackupSettings();
     }
   }, [activeTab]);
 
@@ -131,21 +177,6 @@ export default function AdminPanel({
       loadBackups();
     } catch (err: any) {
       setBackupError('Не удалось создать резервную копию: ' + err.message);
-    }
-  };
-
-  const handleTriggerRetention = async () => {
-    setBackupError('');
-    setBackupSuccess('');
-    if (!window.confirm('Вы уверены, что хотите вручную запустить очистку данных? Все анкеты, логи и резервные копии старше 1 года будут безвозвратно удалены.')) {
-      return;
-    }
-    try {
-      await triggerRetentionPolicyAsync();
-      setBackupSuccess('Политика очистки успешно выполнена! Устаревшие данные удалены.');
-      loadBackups();
-    } catch (err: any) {
-      setBackupError('Не удалось запустить очистку: ' + err.message);
     }
   };
 
@@ -345,6 +376,52 @@ export default function AdminPanel({
     setNewQuestionOptions(newQuestionOptions.filter((_, i) => i !== idx));
   };
 
+  // Вспомогательный метод для загрузки и сжатия фотографии (до 1200px)
+  const processImageUpload = (file: File, onSuccess: (dataUrl: string) => void, onError: (err: string) => void) => {
+    if (!file.type.startsWith('image/')) {
+      onError('Пожалуйста, выберите файл изображения (JPG, PNG, WebP)');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new window.Image();
+      img.onload = () => {
+        const MAX_WIDTH = 1200;
+        const MAX_HEIGHT = 1200;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > MAX_WIDTH) {
+            height = Math.round(height * (MAX_WIDTH / width));
+            width = MAX_WIDTH;
+          }
+        } else {
+          if (height > MAX_HEIGHT) {
+            width = Math.round(width * (MAX_HEIGHT / height));
+            height = MAX_HEIGHT;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          onSuccess(e.target?.result as string);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        onSuccess(dataUrl);
+      };
+      img.onerror = () => onSuccess(e.target?.result as string);
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = () => onError('Не удалось прочитать выбранный файл');
+    reader.readAsDataURL(file);
+  };
+
   // Отправка и сохранение нового произвольного вопроса
   const handleAddQuestionSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -368,6 +445,7 @@ export default function AdminPanel({
       text: newQuestionText.trim(),
       type: newQuestionType,
       options: newQuestionType === 'select' ? cleanedOptions : undefined,
+      imageUrl: newQuestionImage.trim() || undefined,
       isDefault: false,
       required: true
     };
@@ -375,39 +453,82 @@ export default function AdminPanel({
     const updatedQuestions = [...questions, newQuestion];
     onUpdateQuestions(updatedQuestions);
     saveStoredQuestions(updatedQuestions);
+    saveStoredQuestionsAsync(updatedQuestions).catch(e => console.error("Ошибка сохранения вопросов на сервере:", e));
 
     // Сброс полей формы
     setNewQuestionText('');
     setNewQuestionType('select');
     setNewQuestionOptions(['', '']);
+    setNewQuestionImage('');
     setQuestionError('');
     setShowAddQuestion(false);
   };
 
-  // Удаление созданного пользователем вопроса
+  // Удаление вопроса
   const handleDeleteQuestion = (qId: string) => {
     const updated = questions.filter(q => q.id !== qId);
     onUpdateQuestions(updated);
     saveStoredQuestions(updated);
+    saveStoredQuestionsAsync(updated).catch(e => console.error("Ошибка сохранения вопросов на сервере:", e));
   };
 
-  // Процедура полной очистки всей базы данных анкет
-  const handleClearAllClick = () => {
-    setIsConfirmClearOpen(true);
-    setConfirmKeywordInput('');
-    setClearError('');
+  // Редактирование вопроса
+  const startEditingQuestion = (q: Question) => {
+    setEditingQuestion(q);
+    setEditQuestionText(q.text);
+    setEditQuestionType(q.type);
+    setEditQuestionOptions(q.options && q.options.length > 0 ? [...q.options] : ['', '']);
+    setEditQuestionImage(q.imageUrl || '');
+    setEditQuestionError('');
   };
 
-  const handleConfirmClearSubmit = (e: React.FormEvent) => {
+  const handleEditOptionChange = (idx: number, val: string) => {
+    const updated = [...editQuestionOptions];
+    updated[idx] = val;
+    setEditQuestionOptions(updated);
+  };
+
+  const addEditOptionField = () => {
+    setEditQuestionOptions([...editQuestionOptions, '']);
+  };
+
+  const removeEditOptionField = (idx: number) => {
+    if (editQuestionOptions.length <= 2) return;
+    setEditQuestionOptions(editQuestionOptions.filter((_, i) => i !== idx));
+  };
+
+  const handleSaveEditedQuestion = (e: React.FormEvent) => {
     e.preventDefault();
-    if (confirmKeywordInput.trim() === 'Подтверждаю') {
-      onClearAll();
-      setIsConfirmClearOpen(false);
-      setConfirmKeywordInput('');
-      setClearError('');
-    } else {
-      setClearError('Неверное кодовое слово. Напишите в точности: Подтверждаю');
+    if (!editingQuestion) return;
+    if (!editQuestionText.trim()) {
+      setEditQuestionError('Пожалуйста, введите текст вопроса');
+      return;
     }
+
+    const cleanedOptions = editQuestionOptions
+      .map(o => o.trim())
+      .filter(o => o !== '');
+
+    if (editQuestionType === 'select' && cleanedOptions.length < 2) {
+      setEditQuestionError('Для выбора укажите не менее 2 вариантов ответа');
+      return;
+    }
+
+    const updated: Question = {
+      ...editingQuestion,
+      text: editQuestionText.trim(),
+      type: editQuestionType,
+      options: editQuestionType === 'select' ? cleanedOptions : undefined,
+      imageUrl: editQuestionImage.trim() || undefined
+    };
+
+    const updatedQuestions = questions.map(q => q.id === editingQuestion.id ? updated : q);
+    onUpdateQuestions(updatedQuestions);
+    saveStoredQuestions(updatedQuestions);
+    saveStoredQuestionsAsync(updatedQuestions).catch(e => console.error("Ошибка сохранения вопросов на сервере:", e));
+
+    setEditingQuestion(null);
+    setEditQuestionError('');
   };
 
   // Экспорт отправленных анкет в красиво оформленную HTML-таблицу, совместимую с Excel (.xls)
@@ -535,16 +656,6 @@ export default function AdminPanel({
             <h2 className="text-lg sm:text-xl font-light text-slate-900 flex flex-wrap items-center gap-2">
               <span>Панель управления <span className="font-semibold text-[#ab2d42]">администратора</span></span>
               <span className="text-xs bg-[#ab2d42]/10 text-[#ab2d42] border border-[#ab2d42]/20 px-2.5 py-0.5 rounded-full font-semibold">ADM</span>
-              {dbStatus?.firebaseConnected ? (
-                <span className="text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-0.5 rounded-full font-semibold flex items-center gap-1.5" title={`Облачная БД: ${dbStatus.projectId}`}>
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  <span>Firebase ({dbStatus.projectId})</span>
-                </span>
-              ) : (
-                <span className="text-xs bg-slate-100 text-slate-600 border border-slate-200 px-2.5 py-0.5 rounded-full font-semibold">
-                  База: Локальная SQLite
-                </span>
-              )}
               {isLoading && (
                 <span className="text-[10px] bg-amber-50 text-amber-700 border border-amber-200/50 px-2.5 py-0.5 rounded-full font-semibold flex items-center gap-1.5 animate-pulse">
                   <Loader2 className="animate-spin text-amber-500" size={10} />
@@ -558,29 +669,12 @@ export default function AdminPanel({
         
         <div className="flex flex-wrap gap-2 w-full md:w-auto">
           <button
-            onClick={handleClearAllClick}
-            className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 bg-red-50 border border-red-200 hover:bg-red-100 text-red-600 hover:text-red-700 px-3 py-2 rounded-lg text-xs font-bold transition-all duration-150 cursor-pointer active:scale-98"
-            id="clear-all-submissions-btn"
-          >
-            <Trash2 size={14} />
-            <span>Очистить базу данных</span>
-          </button>
-
-          <button
             onClick={handleExportXLS}
             className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 bg-[#ab2d42]/5 border border-[#ab2d42]/10 hover:bg-[#ab2d42]/10 text-slate-700 px-3 py-2 rounded-lg text-xs font-bold transition-all duration-150 cursor-pointer active:scale-98"
             title="Экспорт списка абитуриентов в Excel с автоподбором ширины столбцов"
           >
             <FileSpreadsheet size={14} className="text-[#ab2d42]" />
             <span>Выгрузить анкеты (Excel)</span>
-          </button>
-          
-          <button
-            onClick={onBackToMain}
-            className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 bg-[#ab2d42] hover:bg-[#8c1f2f] border border-[#ab2d42]/20 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-md shadow-[#ab2d42]/10 transition-all duration-150 cursor-pointer active:scale-98"
-          >
-            <Eye size={14} />
-            <span>Просмотр сайта</span>
           </button>
         </div>
       </div>
@@ -751,18 +845,6 @@ export default function AdminPanel({
             <div className="mt-4">
               <span className="text-4xl font-extrabold text-slate-900 tracking-tight">{stats.totalCount}</span>
               <span className="text-xs text-slate-500 font-semibold block mt-1">зарегистрированных ответов</span>
-            </div>
-          </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 space-y-2">
-            <div className="flex justify-between text-[11px] text-slate-500">
-              <span>Заполнено мест в БД:</span>
-              <span className="font-bold text-slate-800">{submissions.length.toLocaleString('ru-RU')} / 5 000</span>
-            </div>
-            <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
-              <div 
-                className="bg-[#ab2d42] h-full transition-all duration-300 rounded-full" 
-                style={{ width: `${Math.min(100, (submissions.length / 5000) * 100)}%` }}
-              />
             </div>
           </div>
         </div>
@@ -1121,6 +1203,55 @@ export default function AdminPanel({
                   </div>
                 )}
 
+                {/* Фотография к вопросу (1 фото на вопрос) */}
+                <div className="space-y-1.5 pt-1 border-t border-slate-200/60">
+                  <label className="text-[11px] font-bold text-slate-600 block">
+                    Фотография к вопросу (1 фото):
+                  </label>
+                  
+                  {newQuestionImage ? (
+                    <div className="relative rounded-xl border border-slate-200 bg-white p-2 flex items-center gap-3">
+                      <img
+                        src={newQuestionImage}
+                        alt="Предпросмотр фото к вопросу"
+                        className="w-16 h-16 object-cover rounded-lg border border-slate-100 bg-slate-50"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <span className="text-[11px] font-bold text-slate-800 block truncate">Фотография прикреплена</span>
+                        <span className="text-[10px] text-slate-400 block">Будет показана абитуриентам при заполнении</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setNewQuestionImage('')}
+                        className="p-1.5 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors cursor-pointer text-xs flex items-center gap-1 font-semibold"
+                        title="Удалить фотографию"
+                      >
+                        <Trash2 size={13} />
+                        <span>Удалить</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <label className="px-3 py-1.5 bg-white border border-slate-200 hover:border-[#ab2d42] hover:bg-[#ab2d42]/5 text-slate-700 rounded-lg text-xs font-semibold cursor-pointer flex items-center gap-1.5 transition-colors">
+                        <Upload size={13} className="text-[#ab2d42]" />
+                        <span>Прикрепить фото</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              processImageUpload(file, (dataUrl) => setNewQuestionImage(dataUrl), (err) => setQuestionError(err));
+                            }
+                          }}
+                        />
+                      </label>
+                      <span className="text-[10px] text-slate-400">PNG, JPG, WebP (для одного вопроса одна фотография)</span>
+                    </div>
+                  )}
+                </div>
+
                 {questionError && (
                   <p className="text-[10px] text-red-500 font-medium">{questionError}</p>
                 )}
@@ -1130,6 +1261,7 @@ export default function AdminPanel({
                     type="button"
                     onClick={() => {
                       setShowAddQuestion(false);
+                      setNewQuestionImage('');
                       setQuestionError('');
                     }}
                     className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-500 hover:bg-slate-100 cursor-pointer"
@@ -1154,7 +1286,27 @@ export default function AdminPanel({
                 {questions.map((q, idx) => (
                   <div key={q.id ? `manage-q-${q.id}-${idx}` : `manage-q-${idx}`} className="p-4 border border-slate-200 rounded-xl bg-slate-50 relative group flex flex-col justify-between">
                     <div>
-                      <span className="text-[9px] font-bold text-slate-400 block mb-1">Вопрос {idx + 1} • {q.type === 'select' ? 'Варианты' : 'Текст'}</span>
+                      <div className="flex items-center justify-between pr-20 mb-1">
+                        <span className="text-[9px] font-bold text-slate-400 block">Вопрос {idx + 1} • {q.type === 'select' ? 'Варианты' : 'Текст'}</span>
+                        {q.imageUrl && (
+                          <span className="text-[9px] font-bold bg-rose-50 text-[#ab2d42] border border-[#ab2d42]/20 px-1.5 py-0.5 rounded flex items-center gap-1">
+                            <ImageIcon size={10} />
+                            <span>1 фото</span>
+                          </span>
+                        )}
+                      </div>
+
+                      {q.imageUrl && (
+                        <div className="my-2 rounded-lg overflow-hidden border border-slate-200 bg-white">
+                          <img
+                            src={q.imageUrl}
+                            alt={q.text}
+                            className="w-full h-28 object-contain bg-slate-900/5 mx-auto"
+                            loading="lazy"
+                          />
+                        </div>
+                      )}
+
                       <span className="text-xs font-bold text-slate-800 leading-normal block pr-8">{q.text}</span>
                       
                       {q.options && (
@@ -1169,13 +1321,24 @@ export default function AdminPanel({
                       )}
                     </div>
 
-                    <button
-                      onClick={() => handleDeleteQuestion(q.id)}
-                      className="absolute right-2 top-2 p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
-                      title="Удалить вопрос"
-                    >
-                      <Trash2 size={13} />
-                    </button>
+                    <div className="absolute right-2 top-2 flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => startEditingQuestion(q)}
+                        className="p-1.5 text-slate-500 hover:text-[#ab2d42] hover:bg-white rounded-lg transition-colors cursor-pointer border border-transparent hover:border-slate-200"
+                        title="Редактировать вопрос и фото"
+                      >
+                        <Edit3 size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteQuestion(q.id)}
+                        className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                        title="Удалить вопрос"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1243,15 +1406,6 @@ export default function AdminPanel({
             </div>
             <div className="flex gap-2">
               <button
-                onClick={handleTriggerRetention}
-                disabled={isLoadingBackups}
-                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-amber-600/10 cursor-pointer flex items-center gap-1.5"
-                title="Удалить анкеты, логи и резервные копии старше 1 года"
-              >
-                <CalendarDays size={14} />
-                <span>Очистить старые (&gt;1 года)</span>
-              </button>
-              <button
                 onClick={handleCreateBackup}
                 disabled={isLoadingBackups}
                 className="px-4 py-2 bg-[#ab2d42] hover:bg-[#8c1f2f] text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-[#ab2d42]/10 cursor-pointer flex items-center gap-1.5"
@@ -1262,24 +1416,89 @@ export default function AdminPanel({
             </div>
           </div>
 
-          {/* Карточка статуса Firebase */}
-          <div className="p-4 bg-emerald-50/70 border border-emerald-200 rounded-xl flex items-start gap-3">
-            <div className="p-2 bg-emerald-100 text-emerald-700 rounded-lg shrink-0 mt-0.5">
-              <Database size={18} />
+          {/* Блок настройки автоматического резервного копирования */}
+          <div className="p-5 bg-slate-50 border border-slate-200 rounded-2xl space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200/80">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-[#ab2d42]/10 text-[#ab2d42] border border-[#ab2d42]/20 rounded-xl">
+                  <Clock size={20} />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-bold text-slate-800 text-sm">Автоматическое резервное копирование</h4>
+                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse"></span>
+                      Активно
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Периодическое сохранение полной копии базы данных анкет и настроек
+                  </p>
+                </div>
+              </div>
+
+              {isUpdatingBackupSettings && (
+                <div className="flex items-center gap-1.5 text-xs text-[#ab2d42] font-semibold animate-pulse">
+                  <Loader2 className="animate-spin" size={14} />
+                  <span>Сохранение расписания...</span>
+                </div>
+              )}
             </div>
-            <div className="space-y-1 text-xs">
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-emerald-900">Основное облачное хранилище: Firebase Firestore</span>
-                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-200 text-emerald-800">
-                  Активно
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-700 block">
+                Период авто-бэкапа:
+              </label>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {[
+                  { id: '1d', label: '1 день', desc: 'Каждые 24 часа' },
+                  { id: '3d', label: '3 дня', desc: 'Раз в 3 дня' },
+                  { id: '7d', label: 'Неделя', desc: 'По умолчанию' },
+                  { id: '30d', label: 'Месяц', desc: 'Каждые 30 дней' }
+                ].map((item) => {
+                  const isSelected = backupPeriod === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      disabled={isUpdatingBackupSettings}
+                      onClick={() => handleUpdateBackupPeriod(item.id)}
+                      className={`p-3 rounded-xl border text-left transition-all cursor-pointer relative ${
+                        isSelected
+                          ? 'bg-white border-[#ab2d42] shadow-sm ring-2 ring-[#ab2d42]/15 text-slate-900'
+                          : 'bg-white/80 border-slate-200 hover:border-slate-300 text-slate-600 hover:bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className={`text-xs font-bold ${isSelected ? 'text-[#ab2d42]' : 'text-slate-800'}`}>
+                          {item.label}
+                        </span>
+                        {isSelected && <Check size={14} className="text-[#ab2d42]" />}
+                      </div>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">
+                        {item.desc}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between text-[11px] text-slate-500 pt-1 border-t border-slate-200/60 gap-2">
+              <div className="flex items-center gap-1.5">
+                <span className="font-semibold text-slate-700">Текущий график:</span>
+                <span className="bg-slate-200/70 px-2 py-0.5 rounded-md font-medium text-slate-800">
+                  {backupPeriodLabel}
                 </span>
               </div>
-              <p className="text-emerald-800">
-                Все новые анкеты, ответы абитуриентов, структура вопросов и журнал действий сохраняются в вашем облачном проекте <strong>{dbStatus?.projectId || 'zinc-card-swjrd'}</strong> (база данных: <code className="bg-emerald-100/80 px-1 py-0.5 rounded">{dbStatus?.databaseId || '(default)'}</code>).
-              </p>
-              <p className="text-emerald-700 text-[11px]">
-                Локальный файл SQLite используется как синхронное зеркало безопасности для моментального создания архивов и резервных копий.
-              </p>
+              <div className="flex flex-wrap items-center gap-4 text-[11px]">
+                {lastBackupTime && (
+                  <span>Последний бэкап: <strong className="text-slate-700">{new Date(lastBackupTime).toLocaleString('ru-RU')}</strong></span>
+                )}
+                {nextBackupTime && (
+                  <span>Следующий бэкап: <strong className="text-slate-700">{new Date(nextBackupTime).toLocaleString('ru-RU')}</strong></span>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1353,59 +1572,190 @@ export default function AdminPanel({
         </div>
       )}
 
-      {/* Модальное окно подтверждения удаления всей БД */}
-      {isConfirmClearOpen && (
+      {/* Модальное окно редактирования вопроса и прикрепления фото */}
+      {editingQuestion && (
         <div className="fixed inset-0 z-50 bg-black/65 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-scaleUp text-slate-800">
-            <div className="bg-red-50 border-b border-red-100 px-6 py-6 text-center relative">
-              <div className="w-12 h-12 bg-red-100 text-red-700 rounded-full flex items-center justify-center mx-auto mb-2 border border-red-200">
-                <AlertCircle size={24} />
+          <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-scaleUp text-slate-800 max-h-[90vh] flex flex-col">
+            <div className="bg-slate-50 border-b border-slate-200 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-[#ab2d42]/10 text-[#ab2d42] rounded-lg">
+                  <Edit3 size={18} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Редактирование вопроса анкеты</h3>
+                  <p className="text-[11px] text-slate-500">Изменение текста, вариантов и прикрепление фотографии</p>
+                </div>
               </div>
-              <h3 className="text-lg font-bold font-sans text-slate-900">Очистка всей базы данных</h3>
-              <p className="text-xs text-slate-500 mt-1">Внимание! Это действие удалит все анкеты абитуриентов без возможности восстановления.</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingQuestion(null);
+                  setEditQuestionError('');
+                }}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                <X size={18} />
+              </button>
             </div>
 
-            <form onSubmit={handleConfirmClearSubmit} className="p-6 space-y-4">
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-600 uppercase block">
-                  Для подтверждения введите кодовое слово: <strong className="text-red-600 font-mono">Подтверждаю</strong>
+            <form onSubmit={handleSaveEditedQuestion} className="p-6 overflow-y-auto space-y-4 text-xs">
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-700 block">
+                  Текст вопроса:
                 </label>
                 <input
                   type="text"
-                  value={confirmKeywordInput}
-                  onChange={(e) => {
-                    setConfirmKeywordInput(e.target.value);
-                    if (clearError) setClearError('');
-                  }}
-                  placeholder="Введите слово Подтверждаю"
-                  className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-red-200 focus:border-red-500 text-slate-800 placeholder-slate-400 focus:outline-hidden transition-all"
+                  value={editQuestionText}
+                  onChange={(e) => setEditQuestionText(e.target.value)}
+                  placeholder="Введите текст вопроса"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800 focus:bg-white focus:ring-1 focus:ring-[#ab2d42] focus:border-[#ab2d42] focus:outline-hidden"
                   required
-                  id="clear-all-confirm-input"
                 />
-                <p className="text-[11px] text-slate-400 italic">Подсказка: введите слово <span className="font-semibold text-slate-600">Подтверждаю</span> с большой буквы и без кавычек.</p>
               </div>
 
-              {clearError && (
-                <div className="p-3 bg-red-50 text-red-600 rounded-lg text-xs font-semibold flex items-start gap-2 border border-red-200 animate-slideDown">
-                  <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
-                  <span>{clearError}</span>
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-700 block">
+                  Тип ответа:
+                </label>
+                <select
+                  value={editQuestionType}
+                  onChange={(e) => setEditQuestionType(e.target.value as any)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800 focus:bg-white focus:ring-1 focus:ring-[#ab2d42] focus:border-[#ab2d42] focus:outline-hidden"
+                >
+                  <option value="select">Выбор из вариантов (Один из многих)</option>
+                  <option value="text">Текстовый ответ (Свободный ввод)</option>
+                </select>
+              </div>
+
+              {editQuestionType === 'select' && (
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[11px] font-bold text-slate-700">Варианты ответов:</label>
+                    <button
+                      type="button"
+                      onClick={addEditOptionField}
+                      className="text-[10px] text-[#ab2d42] font-bold hover:underline cursor-pointer"
+                    >
+                      + Добавить вариант
+                    </button>
+                  </div>
+                  
+                  <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                    {editQuestionOptions.map((opt, idx) => (
+                      <div key={`edit-opt-${idx}`} className="flex gap-1 items-center">
+                        <input
+                          type="text"
+                          value={opt}
+                          onChange={(e) => handleEditOptionChange(idx, e.target.value)}
+                          placeholder={`Вариант ${idx + 1}`}
+                          className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 text-slate-800 rounded-lg text-xs focus:bg-white focus:outline-hidden"
+                        />
+                        {editQuestionOptions.length > 2 && (
+                          <button
+                            type="button"
+                            onClick={() => removeEditOptionField(idx)}
+                            className="text-red-500 hover:text-red-600 font-bold text-sm px-1.5"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
-              <div className="flex gap-2.5 pt-2">
+              {/* Фотография к вопросу (1 фото на вопрос) */}
+              <div className="space-y-2 pt-2 border-t border-slate-100">
+                <label className="text-[11px] font-bold text-slate-700 block">
+                  Фотография к вопросу (1 фото):
+                </label>
+
+                {editQuestionImage ? (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 space-y-2.5">
+                    <div className="rounded-lg overflow-hidden border border-slate-200 bg-white max-h-48 flex items-center justify-center">
+                      <img
+                        src={editQuestionImage}
+                        alt="Фото к вопросу"
+                        className="w-full h-auto max-h-48 object-contain"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="px-2.5 py-1 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-lg text-[11px] font-semibold cursor-pointer flex items-center gap-1">
+                        <Upload size={12} className="text-[#ab2d42]" />
+                        <span>Заменить фото</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              processImageUpload(file, (dataUrl) => setEditQuestionImage(dataUrl), (err) => setEditQuestionError(err));
+                            }
+                          }}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setEditQuestionImage('')}
+                        className="px-2.5 py-1 text-red-600 hover:bg-red-50 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                      >
+                        <Trash2 size={12} />
+                        <span>Удалить фото</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-4 border border-dashed border-slate-200 rounded-xl bg-slate-50/50 flex flex-col items-center justify-center gap-2 text-center">
+                    <ImageIcon size={28} className="text-slate-300" />
+                    <div>
+                      <p className="text-[11px] font-medium text-slate-600">Фотография еще не прикреплена</p>
+                      <p className="text-[10px] text-slate-400">Для одного вопроса можно прикрепить 1 фотографию</p>
+                    </div>
+                    <label className="px-3 py-1.5 bg-[#ab2d42] hover:bg-[#8c1f2f] text-white rounded-lg text-xs font-bold cursor-pointer flex items-center gap-1.5 shadow-sm transition-all">
+                      <Upload size={13} />
+                      <span>Выбрать изображение</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            processImageUpload(file, (dataUrl) => setEditQuestionImage(dataUrl), (err) => setEditQuestionError(err));
+                          }
+                        }}
+                      />
+                    </label>
+                  </div>
+                )}
+              </div>
+
+              {editQuestionError && (
+                <div className="p-2.5 bg-red-50 text-red-600 rounded-lg text-xs font-semibold flex items-start gap-1.5 border border-red-200">
+                  <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
+                  <span>{editQuestionError}</span>
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setIsConfirmClearOpen(false)}
-                  className="flex-1 px-4 py-2.5 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg text-sm font-semibold transition-all cursor-pointer"
+                  onClick={() => {
+                    setEditingQuestion(null);
+                    setEditQuestionError('');
+                  }}
+                  className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg text-xs font-semibold transition-all cursor-pointer"
                 >
                   Отмена
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-bold shadow-xs hover:shadow-md transition-all cursor-pointer"
-                  id="confirm-clear-database-btn"
+                  className="flex-1 px-4 py-2 bg-[#ab2d42] hover:bg-[#8c1f2f] text-white rounded-lg text-xs font-bold shadow-md shadow-[#ab2d42]/15 transition-all cursor-pointer flex items-center justify-center gap-1.5"
                 >
-                  Стереть все данные
+                  <Save size={13} />
+                  <span>Сохранить изменения</span>
                 </button>
               </div>
             </form>

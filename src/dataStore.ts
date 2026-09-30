@@ -167,6 +167,10 @@ async function apiCall<T>(
       const errorMsg = errData.error || `Ошибка Node API: ${response.statusText}`;
       const semanticError = new Error(errorMsg);
       (semanticError as any).isSemantic = true;
+      (semanticError as any).status = response.status;
+      if (response.status === 401) {
+        sessionStorage.removeItem('nemk_admin_token');
+      }
       throw semanticError;
     }
 
@@ -181,6 +185,10 @@ async function apiCall<T>(
       usePhpApi = true;
       return res;
     } catch (phpErr: any) {
+      if (phpErr && phpErr.status === 401) {
+        sessionStorage.removeItem('nemk_admin_token');
+        throw phpErr;
+      }
       console.error("Сбои в обоих API (Node и PHP):", phpErr);
       throw phpErr;
     }
@@ -229,7 +237,12 @@ async function callPhp<T>(url: string, method: 'GET' | 'POST' | 'DELETE', body?:
         errMsg = parsed.error;
       }
     } catch (e) {}
-    throw new Error(errMsg);
+    const phpError = new Error(errMsg);
+    (phpError as any).status = response.status;
+    if (response.status === 401) {
+      sessionStorage.removeItem('nemk_admin_token');
+    }
+    throw phpError;
   }
 
   return await response.json();
@@ -246,17 +259,38 @@ export async function getStoredSubmissionsAsync(): Promise<Submission[]> {
     submissionsCache = docsList;
     return docsList;
   } catch (error: any) {
-    console.error("Ошибка при получении анкет с сервера через API:", error);
-    // Если ошибка авторизации, пробрасываем её наверх, чтобы App.tsx мог разлогинить пользователя
-    if (error && error.message && (
-      error.message.includes("токен") || 
-      error.message.includes("авторизац") || 
-      error.message.includes("401") ||
-      error.message.includes("отсутствует заголовок")
-    )) {
+    const isAuthError = (error && error.status === 401) || (
+      error && error.message && (
+        error.message.includes("токен") || 
+        error.message.includes("авторизац") || 
+        error.message.includes("401") ||
+        error.message.includes("отсутствует заголовок") ||
+        error.message.includes("сессия")
+      )
+    );
+
+    if (isAuthError) {
+      sessionStorage.removeItem('nemk_admin_token');
+      submissionsCache = [];
       throw error;
     }
+
+    console.error("Ошибка при получении анкет с сервера через API:", error);
     return submissionsCache; // Возвращаем только то, что в памяти
+  }
+}
+
+// Проверка активности и валидности сессионного токена администратора
+export async function verifySessionAsync(): Promise<boolean> {
+  const token = sessionStorage.getItem('nemk_admin_token');
+  if (!token) return false;
+  try {
+    const res = await apiCall<{ ok: boolean }>('/api/check-session', '?action=check-session', 'GET');
+    return !!(res && res.ok);
+  } catch (e) {
+    sessionStorage.removeItem('nemk_admin_token');
+    submissionsCache = [];
+    return false;
   }
 }
 
@@ -291,7 +325,7 @@ export async function getCaptchaChallenge(): Promise<{ id: string; num1: number;
   }
 }
 
-// Сохранение анкеты абитуриента со строгим контролем лимита в 5000 записей (без локальной записи)
+// Сохранение анкеты абитуриента в базу данных (без ограничений емкости)
 export async function saveSubmissionAsync(submission: {
   applicantName: string;
   referrerName: string;
@@ -346,6 +380,25 @@ export async function getBackupsAsync(): Promise<any[]> {
   return await apiCall<any[]>('/api/submissions/backups', '?action=backups', 'GET');
 }
 
+export async function getBackupSettingsAsync(): Promise<{
+  period: string;
+  periodLabel: string;
+  lastBackupTime: number | null;
+  nextBackupTime: number | null;
+}> {
+  return await apiCall<any>('/api/submissions/backup-settings', '', 'GET');
+}
+
+export async function updateBackupSettingsAsync(period: string): Promise<{
+  success: boolean;
+  period: string;
+  periodLabel: string;
+  lastBackupTime: number | null;
+  nextBackupTime: number | null;
+}> {
+  return await apiCall<any>('/api/submissions/backup-settings', '', 'POST', { period });
+}
+
 export async function createBackupAsync(): Promise<void> {
   await apiCall<any>('/api/submissions/backup', '?action=backup', 'POST');
 }
@@ -356,10 +409,6 @@ export async function restoreBackupAsync(filename: string): Promise<void> {
 
 export async function deleteBackupAsync(filename: string): Promise<void> {
   await apiCall<any>(`/api/submissions/backups/${filename}`, `?action=delete-backup&filename=${filename}`, 'DELETE', { filename });
-}
-
-export async function triggerRetentionPolicyAsync(): Promise<void> {
-  await apiCall<any>('/api/submissions/retention', '?action=retention', 'POST');
 }
 
 export async function getDbStatusAsync(): Promise<{

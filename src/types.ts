@@ -3,6 +3,7 @@ export interface Question {
   text: string;
   type: 'select' | 'text';
   options?: string[];
+  imageUrl?: string;
   isDefault: boolean;
   required: boolean;
 }
