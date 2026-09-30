@@ -14,7 +14,7 @@ import {
   logoutAdmin,
   verifySessionAsync
 } from './dataStore';
-import { Shield, Key, Eye, HelpCircle, Check, AlertTriangle, Sparkles, Loader2 } from 'lucide-react';
+import { Shield, Eye, EyeOff, HelpCircle, Check, AlertTriangle, Sparkles, Loader2 } from 'lucide-react';
 
 export default function App() {
   const [isAdminMode, setIsAdminMode] = useState(false);
@@ -35,6 +35,7 @@ export default function App() {
   // Состояние авторизации (логин/пароль)
   const [loginInput, setLoginInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loginError, setLoginError] = useState('');
 
   // Загрузка начальных данных
@@ -127,6 +128,7 @@ export default function App() {
       setIsLoginModalOpen(false);
       setLoginInput('');
       setPasswordInput('');
+      setShowPassword(false);
       setLoginError('');
     } catch (err: any) {
       setLoginError(err.message || 'Неверный логин или пароль. Попробуйте еще раз.');
@@ -261,17 +263,26 @@ export default function App() {
                 <label className="text-xs font-bold text-slate-500 uppercase block">Пароль</label>
                 <div className="relative">
                   <input
-                    type="password"
+                    type={showPassword ? 'text' : 'password'}
                     value={passwordInput}
                     onChange={(e) => setPasswordInput(e.target.value)}
                     placeholder="Введите пароль"
-                    className="w-full pl-4 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-[#ab2d42]/20 focus:border-[#ab2d42] text-slate-800 placeholder-slate-400 focus:outline-hidden transition-all"
+                    className="w-full pl-4 pr-11 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-[#ab2d42]/20 focus:border-[#ab2d42] text-slate-800 placeholder-slate-400 focus:outline-hidden transition-all"
                     id="adm-pwd-field"
                     name="adm-pwd-field"
                     autoComplete="new-password"
                     required
                   />
-                  <Key className="absolute right-3 top-3.5 text-slate-400" size={16} />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(prev => !prev)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-400 hover:text-[#ab2d42] hover:bg-slate-200/60 rounded-md transition-colors cursor-pointer"
+                    title={showPassword ? 'Скрыть пароль' : 'Показать пароль'}
+                    aria-label={showPassword ? 'Скрыть пароль' : 'Показать пароль'}
+                    tabIndex={-1}
+                  >
+                    {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+                  </button>
                 </div>
               </div>
 
@@ -291,6 +302,7 @@ export default function App() {
                     setLoginError('');
                     setLoginInput('');
                     setPasswordInput('');
+                    setShowPassword(false);
                   }}
                   className="flex-1 px-4 py-2.5 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg text-sm font-semibold transition-all cursor-pointer"
                 >
