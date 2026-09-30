@@ -1251,7 +1251,7 @@ async function startServer() {
     });
   }
 
-  const HOST = process.env.NODE_ENV === 'production' ? '127.0.0.1' : '0.0.0.0';
+  const HOST = '0.0.0.0';
   app.listen(PORT, HOST, () => {
     console.log(`Сервер запущен на http://${HOST}:${PORT}`);
   });
