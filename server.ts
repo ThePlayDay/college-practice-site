@@ -605,7 +605,7 @@ async function startServer() {
   setInterval(checkAndRunAutoBackup, 15 * 60 * 1000);
 
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Дополнительная защита сервера и заголовки безопасности
   app.disable('x-powered-by');
@@ -1251,7 +1251,7 @@ async function startServer() {
     });
   }
 
-  const HOST = process.env.NODE_ENV === 'production' ? '127.0.0.1' : '0.0.0.0';
+  const HOST = '0.0.0.0';
   app.listen(PORT, HOST, () => {
     console.log(`Сервер запущен на http://${HOST}:${PORT}`);
   });
